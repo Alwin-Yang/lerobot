@@ -27,6 +27,7 @@ from lerobot.common.train_utils import (
     save_training_metadata,
     save_training_state,
     should_save_checkpoint,
+    update_best_checkpoints,
     update_last_checkpoint,
 )
 from lerobot.configs.default import DatasetConfig
@@ -93,6 +94,37 @@ def test_update_last_checkpoint(tmp_path):
     last_checkpoint = tmp_path / LAST_CHECKPOINT_LINK
     assert last_checkpoint.is_symlink()
     assert last_checkpoint.resolve() == checkpoint
+
+
+def test_update_best_checkpoints_keeps_top_k_plus_latest(tmp_path):
+    scores = [
+        (10.0, 1.0),
+        (70.0, 7.0),
+        (40.0, 4.0),
+        (90.0, 9.0),
+        (20.0, 2.0),
+        (80.0, 8.0),
+        (30.0, 3.0),
+        (5.0, 0.5),
+    ]
+    for step, (success, reward) in enumerate(scores, start=1):
+        checkpoint = tmp_path / f"{step:06d}"
+        checkpoint.mkdir()
+        update_last_checkpoint(checkpoint)
+        update_best_checkpoints(
+            checkpoint,
+            pc_success=success,
+            avg_sum_reward=reward,
+            keep_best=5,
+        )
+
+    expected_best = {"000002", "000003", "000004", "000006", "000007"}
+    actual_dirs = {
+        path.name for path in tmp_path.iterdir() if path.is_dir() and not path.is_symlink()
+    }
+    assert actual_dirs == expected_best | {"000008"}
+    assert (tmp_path / "best").resolve().name == "000004"
+    assert (tmp_path / LAST_CHECKPOINT_LINK).resolve().name == "000008"
 
 
 # save_checkpoint round-trips (all formats, real policies) live in

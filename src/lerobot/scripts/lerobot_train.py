@@ -55,6 +55,7 @@ from lerobot.common.train_utils import (
     resume_before_prepare,
     save_checkpoint,
     should_save_checkpoint,
+    update_best_checkpoints,
     update_last_checkpoint,
 )
 from lerobot.common.wandb_utils import WandBLogger
@@ -892,12 +893,27 @@ def train(cfg: TrainPipelineConfig):
                     dp_world_size=parallel_dims.dp_world_size,
                 )
                 eval_tracker.eval_s = aggregated.pop("eval_s")
-                eval_tracker.avg_sum_reward = aggregated.pop("avg_sum_reward")
-                eval_tracker.pc_success = aggregated.pop("pc_success")
+                avg_sum_reward = aggregated.pop("avg_sum_reward")
+                eval_tracker.avg_sum_reward = avg_sum_reward
+                pc_success = aggregated.pop("pc_success")
+                eval_tracker.pc_success = pc_success
                 if wandb_logger:
                     wandb_log_dict = {**eval_tracker.to_dict(), **eval_info}
                     wandb_logger.log_dict(wandb_log_dict, step, mode="eval")
                     wandb_logger.log_video(eval_info["overall"]["video_paths"][0], step, mode="eval")
+                if cfg.keep_best_checkpoints > 0:
+                    checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
+                    best_checkpoints = update_best_checkpoints(
+                        checkpoint_dir,
+                        pc_success=pc_success,
+                        avg_sum_reward=avg_sum_reward,
+                        keep_best=cfg.keep_best_checkpoints,
+                    )
+                    logging.info(
+                        "Top-%d checkpoints by rollout success: %s",
+                        cfg.keep_best_checkpoints,
+                        [path.name for path in best_checkpoints],
+                    )
 
             accelerator.wait_for_everyone()
 

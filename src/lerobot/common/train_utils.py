@@ -24,6 +24,7 @@ its writes live in the same method.
 """
 
 import logging
+import shutil
 from importlib.resources import files
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -127,6 +128,70 @@ def update_last_checkpoint(checkpoint_dir: Path) -> None:
         last_checkpoint_dir.unlink()
     relative_target = checkpoint_dir.relative_to(checkpoint_dir.parent)
     last_checkpoint_dir.symlink_to(relative_target)
+
+
+def update_best_checkpoints(
+    checkpoint_dir: Path,
+    *,
+    pc_success: float,
+    avg_sum_reward: float,
+    keep_best: int,
+) -> list[Path]:
+    """Record rollout metrics and retain top checkpoints plus the latest checkpoint."""
+    if keep_best <= 0:
+        raise ValueError(f"keep_best must be positive, got {keep_best}")
+    if not checkpoint_dir.is_dir():
+        raise FileNotFoundError(f"Checkpoint directory does not exist: {checkpoint_dir}")
+
+    checkpoints_dir = checkpoint_dir.parent
+    metrics_filename = "eval_metrics.json"
+    write_json(
+        {
+            "pc_success": float(pc_success),
+            "avg_sum_reward": float(avg_sum_reward),
+        },
+        checkpoint_dir / metrics_filename,
+    )
+
+    ranked: list[tuple[float, float, int, Path]] = []
+    for candidate in checkpoints_dir.iterdir():
+        if candidate.is_symlink() or not candidate.is_dir():
+            continue
+        metrics_path = candidate / metrics_filename
+        if not metrics_path.is_file():
+            continue
+        metrics = load_json(metrics_path)
+        try:
+            step = int(candidate.name)
+            success = float(metrics["pc_success"])
+            reward = float(metrics["avg_sum_reward"])
+        except (KeyError, TypeError, ValueError):
+            logging.warning("Ignoring invalid checkpoint metrics in %s", metrics_path)
+            continue
+        ranked.append((success, reward, step, candidate))
+
+    ranked.sort(key=lambda item: item[:3], reverse=True)
+    top_checkpoints = [item[3] for item in ranked[:keep_best]]
+
+    best_link = checkpoints_dir / "best"
+    if best_link.is_symlink():
+        best_link.unlink()
+    elif best_link.exists():
+        raise FileExistsError(f"Cannot create best checkpoint symlink: {best_link} already exists")
+    if top_checkpoints:
+        best_link.symlink_to(top_checkpoints[0].relative_to(checkpoints_dir))
+
+    last_link = checkpoints_dir / LAST_CHECKPOINT_LINK
+    last_checkpoint = last_link.resolve() if last_link.is_symlink() else None
+    retained = {path.resolve() for path in top_checkpoints}
+    if last_checkpoint is not None:
+        retained.add(last_checkpoint)
+
+    for _, _, _, candidate in ranked[keep_best:]:
+        if candidate.resolve() not in retained:
+            shutil.rmtree(candidate)
+
+    return top_checkpoints
 
 
 # ---------------------------------------------------------------------------------------------

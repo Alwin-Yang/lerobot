@@ -152,6 +152,9 @@ class TrainPipelineConfig(HubMixin):
     # Checkpoint is saved every `save_freq` training iterations and after the last training step.
     # A non-positive value disables periodic saving, keeping only the final checkpoint.
     save_freq: int = 20_000
+    # Retain top-k checkpoints by rollout success, then average summed reward.
+    # The latest checkpoint is retained separately for resume; zero disables rotation.
+    keep_best_checkpoints: int = 0
     # Model-artifact format inside checkpoints; non-default values require a sharded run.
     checkpoint_format: CheckpointFormat = CheckpointFormat.SAFETENSORS
     use_policy_training_preset: bool = True
@@ -317,6 +320,19 @@ class TrainPipelineConfig(HubMixin):
 
         if self.eval_steps > 0 and self.dataset.eval_split == 0.0:
             raise ValueError("eval_steps > 0 requires dataset.eval_split > 0.0 to hold out eval data.")
+
+        if self.keep_best_checkpoints < 0:
+            raise ValueError("keep_best_checkpoints must be non-negative.")
+        if self.keep_best_checkpoints > 0:
+            if self.env is None or self.env_eval_freq <= 0:
+                raise ValueError("keep_best_checkpoints > 0 requires environment evaluation.")
+            if not self.save_checkpoint or self.save_freq <= 0:
+                raise ValueError("keep_best_checkpoints > 0 requires periodic checkpoint saving.")
+            if self.save_freq != self.env_eval_freq:
+                raise ValueError(
+                    "keep_best_checkpoints > 0 requires save_freq == env_eval_freq so every "
+                    "ranked rollout has a checkpoint."
+                )
 
         # Remote runs auto-generate the repo_id in submit_to_hf (the policy may only be
         # resolved here, from --policy.path), so don't demand it up front for them.
