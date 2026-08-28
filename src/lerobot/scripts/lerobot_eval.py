@@ -164,6 +164,17 @@ def _build_raw_frame(
     return frame
 
 
+def _get_task_descriptions(env: gym.vector.VectorEnv, fallback_task: str | None = None) -> list[str]:
+    """Return per-env task text, falling back when the environment exposes no task attribute."""
+    try:
+        return list(env.call("task_description"))
+    except (AttributeError, NotImplementedError):
+        try:
+            return list(env.call("task"))
+        except (AttributeError, NotImplementedError):
+            return [fallback_task or ""] * env.num_envs
+
+
 def rollout(
     env: gym.vector.VectorEnv,
     policy: PreTrainedPolicy,
@@ -179,6 +190,7 @@ def rollout(
     recording_repo_id: str | None = None,
     recording_private: bool = False,
     predicted_latents_callback: Callable[[PreTrainedPolicy], None] | None = None,
+    fallback_task: str | None = None,
 ) -> dict:
     """Run a batched policy rollout once through a batch of environments.
 
@@ -211,6 +223,8 @@ def rollout(
         predicted_latents_callback: Optional callback invoked after every ``select_action`` with the policy
             itself. World-model policies (e.g. LingBot-VA) stash predicted video latents on
             ``policy.last_predicted_latents``; this lets the caller concatenate chunks and decode once.
+        fallback_task: Task text used only when the environment exposes neither ``task_description`` nor
+            ``task``. This keeps task-conditioned policies aligned with single-task training datasets.
     Returns:
         The dictionary described above.
     """
@@ -246,10 +260,7 @@ def rollout(
                 )
             )
         raw_observation = deepcopy(observation)
-        try:
-            task_desc = list(env.call("task_description"))[0]
-        except (AttributeError, NotImplementedError):
-            task_desc = ""
+        task_desc = _get_task_descriptions(env, fallback_task)[0]
 
     all_observations = []
     all_actions = []
@@ -267,7 +278,8 @@ def rollout(
         disable=inside_slurm(),  # we dont want progress bar when we use slurm, since it clutters the logs
         leave=False,
     )
-    check_env_attributes_and_types(env)
+    if fallback_task is None:
+        check_env_attributes_and_types(env)
     try:
         while not np.all(done) and step < max_steps:
             # Numpy array to tensor and changing dictionary keys to LeRobot policy format.
@@ -275,15 +287,8 @@ def rollout(
             if return_observations:
                 all_observations.append(deepcopy(observation))
 
-            # Infer "task" from sub-environments (prefer natural language description).
-            # env.call() works with both SyncVectorEnv and AsyncVectorEnv.
-            try:
-                observation["task"] = list(env.call("task_description"))
-            except (AttributeError, NotImplementedError):
-                try:
-                    observation["task"] = list(env.call("task"))
-                except (AttributeError, NotImplementedError):
-                    observation["task"] = [""] * env.num_envs
+            # Prefer environment-provided task text; use the caller's dataset-derived fallback otherwise.
+            observation["task"] = _get_task_descriptions(env, fallback_task)
 
             # Apply environment-specific preprocessing (e.g., LiberoProcessorStep for LIBERO)
             observation = env_preprocessor(observation)
@@ -428,6 +433,7 @@ def eval_policy(
     recording_repo_id: str | None = None,
     recording_private: bool = False,
     save_predicted_video: bool = False,
+    fallback_task: str | None = None,
 ) -> dict:
     """
     Args:
@@ -440,6 +446,7 @@ def eval_policy(
             the "episodes" key of the returned dictionary.
         start_seed: The first seed to use for the first individual rollout. For all subsequent rollouts the
             seed is incremented by 1. If not provided, the environments are not manually seeded.
+        fallback_task: Task text used when the environment has no task attribute.
     Returns:
         Dictionary with metrics and data regarding the rollouts.
     """
@@ -546,6 +553,7 @@ def eval_policy(
             recording_repo_id=recording_repo_id,
             recording_private=recording_private,
             predicted_latents_callback=collect_predicted_latents if save_predicted_video else None,
+            fallback_task=fallback_task,
         )
 
         # Figure out where in each rollout sequence the first done condition was encountered (results after
@@ -851,6 +859,7 @@ def eval_one(
     env_features: dict | None = None,
     recording_repo_id: str | None = None,
     recording_private: bool = False,
+    fallback_task: str | None = None,
 ) -> TaskMetrics:
     """Evaluates one task_id of one suite using the provided vec env."""
 
@@ -872,6 +881,7 @@ def eval_one(
         env_features=env_features,
         recording_repo_id=recording_repo_id,
         recording_private=recording_private,
+        fallback_task=fallback_task,
     )
 
     per_episode = task_result["per_episode"]
@@ -903,6 +913,7 @@ def run_one(
     env_features: dict | None = None,
     recording_repo_id: str | None = None,
     recording_private: bool = False,
+    fallback_task: str | None = None,
 ):
     """
     Run eval_one for a single (task_group, task_id, env).
@@ -937,6 +948,7 @@ def run_one(
         env_features=env_features,
         recording_repo_id=task_repo_id,
         recording_private=recording_private,
+        fallback_task=fallback_task,
     )
 
     if max_episodes_rendered > 0:
@@ -963,6 +975,7 @@ def eval_policy_all(
     return_episode_data: bool = False,
     start_seed: int | None = None,
     max_parallel_tasks: int = 1,
+    fallback_task: str | None = None,
 ) -> dict:
     """
     Evaluate a nested `envs` dict: {task_group: {task_id: vec_env}}.
@@ -1022,6 +1035,7 @@ def eval_policy_all(
         env_features=env_features,
         recording_repo_id=recording_repo_id,
         recording_private=recording_private,
+        fallback_task=fallback_task,
     )
 
     # Set the shared policy's mode before launching any workers. Restoring it

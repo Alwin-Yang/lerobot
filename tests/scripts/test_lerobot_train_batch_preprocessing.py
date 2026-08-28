@@ -12,12 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
 pytest.importorskip("datasets", reason="datasets is required (install lerobot[dataset])")
 
-from lerobot.scripts.lerobot_train import _preprocess_dataset_batch  # noqa: E402
+from lerobot.scripts.lerobot_train import _preprocess_dataset_batch, _single_dataset_task  # noqa: E402
 from lerobot.utils.constants import ACTION, OBS_IMAGES  # noqa: E402
 
 
@@ -44,3 +46,23 @@ def test_preprocess_dataset_batch_normalizes_and_renames_before_processor():
     assert set(processed) == {f"{OBS_IMAGES}.camera1", ACTION}
     assert processed[f"{OBS_IMAGES}.camera1"].dtype == torch.float32
     torch.testing.assert_close(processed[f"{OBS_IMAGES}.camera1"], torch.ones(1, 3, 2, 2))
+
+
+@pytest.mark.parametrize(
+    ("tasks", "expected"),
+    [
+        (
+            ["Push the T-shaped block onto the T-shaped target."],
+            "Push the T-shaped block onto the T-shaped target.",
+        ),
+        ([], None),
+        (["task one", "task two"], None),
+        ([""], None),
+        (None, None),
+    ],
+)
+def test_single_dataset_task_only_returns_an_unambiguous_nonempty_task(tasks, expected):
+    tasks_metadata = None if tasks is None else SimpleNamespace(index=tasks)
+    dataset = SimpleNamespace(meta=SimpleNamespace(tasks=tasks_metadata))
+
+    assert _single_dataset_task(dataset) == expected

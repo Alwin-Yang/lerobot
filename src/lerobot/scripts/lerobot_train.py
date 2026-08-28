@@ -126,6 +126,15 @@ def _make_eval_envs(cfg: TrainPipelineConfig) -> Iterator[dict[str, dict[int, An
         close_envs(envs)
 
 
+def _single_dataset_task(dataset: Any) -> str | None:
+    """Return the sole dataset task, or None when a safe one-to-one fallback is unavailable."""
+    tasks = getattr(getattr(dataset, "meta", None), "tasks", None)
+    if tasks is None or len(tasks.index) != 1:
+        return None
+    task = str(tasks.index[0])
+    return task or None
+
+
 def _preprocess_dataset_batch(
     batch: dict[str, Any],
     camera_keys: list[str],
@@ -446,6 +455,10 @@ def train(cfg: TrainPipelineConfig):
     accelerator.wait_for_everyone()
     if not is_main_process():
         dataset, eval_dataset = make_train_eval_datasets(cfg)
+
+    eval_fallback_task = _single_dataset_task(dataset) if cfg.env is not None else None
+    if is_main_process() and eval_fallback_task is not None:
+        logging.info("Using single dataset task as env eval fallback: %r", eval_fallback_task)
 
     # --- policy (weight source decided by the resume rule) -------------------------------------
     # On resume, cfg was parsed FROM the checkpoint's train_config.json, so cfg.checkpoint_format
@@ -870,6 +883,7 @@ def train(cfg: TrainPipelineConfig):
                         max_episodes_rendered=4,
                         start_seed=cfg.seed,
                         max_parallel_tasks=cfg.env.max_parallel_tasks,
+                        fallback_task=eval_fallback_task,
                     )
                 # overall metrics (suite-agnostic)
                 aggregated = eval_info["overall"]
@@ -897,6 +911,13 @@ def train(cfg: TrainPipelineConfig):
                 eval_tracker.avg_sum_reward = avg_sum_reward
                 pc_success = aggregated.pop("pc_success")
                 eval_tracker.pc_success = pc_success
+                logging.info(
+                    "Eval metrics at step %d: pc_success=%.1f avg_sum_reward=%.3f eval_s=%.3f",
+                    step,
+                    pc_success,
+                    avg_sum_reward,
+                    eval_tracker.eval_s.avg,
+                )
                 if wandb_logger:
                     wandb_log_dict = {**eval_tracker.to_dict(), **eval_info}
                     wandb_logger.log_dict(wandb_log_dict, step, mode="eval")
