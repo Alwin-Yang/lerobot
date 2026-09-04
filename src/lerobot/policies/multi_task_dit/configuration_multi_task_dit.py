@@ -52,11 +52,20 @@ class MultiTaskDiTConfig(PreTrainedConfig):
     sigma_min: float = 0.0  # Minimum noise in flow interpolation path
     num_integration_steps: int = 100  # ODE integration steps at inference
     integration_method: str = "euler"  # ODE solver: "euler" or "rk4"
+    # (FM, euler only) At every Euler step clip the implied clean-sample estimate
+    # x1_pred = x_t + (1 - t) * v to [-clip_sample_range, clip_sample_range] and
+    # re-derive the velocity from the clipped estimate. This is the flow-matching
+    # analogue of DDPMScheduler(clip_sample=True), which clips x0_pred each step.
+    # Intermediate x_t is never clipped: it legitimately carries unbounded noise.
+    flow_clip_x1_pred: bool = False
     timestep_sampling_strategy: str = "beta"  # "uniform" or "beta"
 
     timestep_sampling_s: float = 0.999  # (beta only) Max timestep threshold
     timestep_sampling_alpha: float = 1.5  # (beta only) Beta distribution alpha
     timestep_sampling_beta: float = 1.0  # (beta only) Beta distribution beta
+    timestep_embedding_type: str = "lerobot"  # (FM only) original "lerobot" or OpenPI-style "openpi"
+    min_period: float = 4e-3  # Smallest period for the normalized [0, 1] FM time embedding
+    max_period: float = 4.0  # Largest period for the normalized [0, 1] FM time embedding
 
     # Transformer Architecture
     hidden_dim: int = 512  # Transformer hidden dimension
@@ -178,8 +187,14 @@ class MultiTaskDiTConfig(PreTrainedConfig):
                 raise ValueError(
                     f"integration_method must be 'euler' or 'rk4', got {self.integration_method}"
                 )
+            if self.flow_clip_x1_pred and self.integration_method != "euler":
+                raise ValueError("flow_clip_x1_pred is only implemented for integration_method='euler'")
+            if self.flow_clip_x1_pred and self.clip_sample_range <= 0:
+                raise ValueError(f"clip_sample_range must be positive, got {self.clip_sample_range}")
             if self.timestep_sampling_strategy not in ["uniform", "beta"]:
                 raise ValueError("timestep_sampling_strategy must be 'uniform' or 'beta'")
+            if self.timestep_embedding_type not in ["lerobot", "openpi"]:
+                raise ValueError("timestep_embedding_type must be 'lerobot' or 'openpi'")
             if self.timestep_sampling_strategy == "beta":
                 if not (0.0 < self.timestep_sampling_s <= 1.0):
                     raise ValueError(f"timestep_sampling_s must be in (0, 1], got {self.timestep_sampling_s}")
@@ -187,6 +202,14 @@ class MultiTaskDiTConfig(PreTrainedConfig):
                     raise ValueError("timestep_sampling_alpha must be positive")
                 if self.timestep_sampling_beta <= 0:
                     raise ValueError("timestep_sampling_beta must be positive")
+            if self.timestep_embedding_type == "openpi":
+                if self.min_period <= 0:
+                    raise ValueError(f"min_period must be positive, got {self.min_period}")
+                if self.max_period < self.min_period:
+                    raise ValueError(
+                        f"max_period must be greater than or equal to min_period, got "
+                        f"min_period={self.min_period}, max_period={self.max_period}"
+                    )
 
     def get_optimizer_preset(self) -> AdamConfig:
         return AdamConfig(

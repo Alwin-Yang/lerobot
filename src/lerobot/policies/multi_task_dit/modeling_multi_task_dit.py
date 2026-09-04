@@ -61,6 +61,7 @@ from lerobot.utils.constants import (
     OBS_STATE,
 )
 
+from ..common.vla_utils import create_sinusoidal_pos_embedding
 from ..pretrained import PreTrainedPolicy
 from ..utils import populate_queues
 
@@ -392,7 +393,7 @@ def modulate(x: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
 
 
 class SinusoidalPosEmb(nn.Module):
-    """Sinusoidal positional embeddings for timesteps."""
+    """Original LeRobot sinusoidal embedding for discrete diffusion timesteps."""
 
     def __init__(self, dim: int):
         super().__init__()
@@ -406,6 +407,26 @@ class SinusoidalPosEmb(nn.Module):
         emb = x[:, None] * emb[None, :]
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
+
+
+class NormalizedSinusoidalPosEmb(nn.Module):
+    """OpenPI-style sinusoidal embedding for continuous timesteps in [0, 1]."""
+
+    def __init__(self, dim: int, min_period: float, max_period: float):
+        super().__init__()
+        self.dim = dim
+        self.min_period = min_period
+        self.max_period = max_period
+
+    def forward(self, x: Tensor) -> Tensor:
+        embedding = create_sinusoidal_pos_embedding(
+            x,
+            self.dim,
+            min_period=self.min_period,
+            max_period=self.max_period,
+            device=x.device,
+        )
+        return embedding.to(dtype=x.dtype)
 
 
 class RotaryPositionalEmbedding(nn.Module):
@@ -571,8 +592,16 @@ class DiffusionTransformer(nn.Module):
         self.use_rope = config.use_rope
 
         self.timestep_embed_dim = config.timestep_embed_dim
+        if config.is_flow_matching and config.timestep_embedding_type == "openpi":
+            timestep_encoder = NormalizedSinusoidalPosEmb(
+                self.timestep_embed_dim,
+                min_period=config.min_period,
+                max_period=config.max_period,
+            )
+        else:
+            timestep_encoder = SinusoidalPosEmb(self.timestep_embed_dim)
         self.time_mlp = nn.Sequential(
-            SinusoidalPosEmb(self.timestep_embed_dim),
+            timestep_encoder,
             nn.Linear(self.timestep_embed_dim, 2 * self.timestep_embed_dim),
             nn.GELU(),
             nn.Linear(2 * self.timestep_embed_dim, self.timestep_embed_dim),
@@ -781,14 +810,35 @@ class FlowMatchingObjective(nn.Module):
         self, model: nn.Module, x_init: Tensor, time_grid: Tensor, conditioning_vec: Tensor
     ) -> Tensor:
         x = x_init
+        clip_x1 = self.config.flow_clip_x1_pred
         for i in range(len(time_grid) - 1):
             t_scalar = time_grid[i].item()
             dt = (time_grid[i + 1] - time_grid[i]).item()
             t_batch = torch.full((x.shape[0],), t_scalar, dtype=x.dtype, device=x.device)
             with torch.no_grad():
                 velocity = model(x, t_batch, conditioning_vec=conditioning_vec)
+            if clip_x1:
+                velocity = self._clip_velocity_via_x1_pred(x, velocity, t_scalar)
             x = x + dt * velocity
         return x
+
+    def _clip_velocity_via_x1_pred(self, x: Tensor, velocity: Tensor, t: float) -> Tensor:
+        """Clip the implied clean sample and return the velocity that points at it.
+
+        On the linear path x_t = t*x1 + (1 - (1 - sigma_min)*t)*x0 with target
+        velocity v = x1 - (1 - sigma_min)*x0, the network's estimate of the
+        endpoint is x1_pred = x_t + (1 - t)*v (exactly x1 when sigma_min == 0).
+        We project x1_pred onto [-r, r] -- the known support of MIN_MAX-normalised
+        actions -- and rebuild v so the Euler step heads for the projected point.
+        On the last step dt == 1 - t, so the returned sample is the clipped x1_pred
+        itself, mirroring DDPM's final clipped x0.
+        """
+        remaining = 1.0 - t
+        if remaining <= 0.0:
+            return velocity
+        r = self.config.clip_sample_range
+        x1_pred = (x + remaining * velocity).clamp(-r, r)
+        return (x1_pred - x) / remaining
 
     def _rk4_integrate(
         self, model: nn.Module, x_init: Tensor, time_grid: Tensor, conditioning_vec: Tensor
